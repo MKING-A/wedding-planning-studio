@@ -247,6 +247,10 @@
       }
     });
   }
+  window.VowSuiteTorontoBridge = Object.freeze({
+    snapshot: () => JSON.parse(JSON.stringify(state)),
+    restore: data => { state=normalize(data); editingId=null; save(); render(); }
+  });
   if(layout()){bind();save();render();}
 })();
 
