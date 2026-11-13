@@ -3,7 +3,7 @@ const LEGACY_STORAGE_KEY = "vowsuite-plan-v1";
 const COUPLES_STORAGE_KEY = "vowsuite-couples-v1";
 const CLOUD_SYNC_STORAGE_KEY = "vowsuite-cloud-sync-v1";
 const APP_VERSION = "v1.4.0";
-const money = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 });
+const money = new Intl.NumberFormat("en-CA", { style: "currency", currency: "CAD", maximumFractionDigits: 0 });
 const today = new Date();
 
 const demoPlan = {
@@ -169,9 +169,9 @@ function createBlankPlan() {
   return {
     couple: "New Couple",
     venue: "Venue TBD",
-    weddingDate: `${nextYear}-06-20`,
-    budgetTarget: 50000,
-    guestTarget: 100,
+    weddingDate: "2028-05-20",
+    budgetTarget: 55000,
+    guestTarget: 150,
     style: "",
     weights: { guests: 25, tasks: 25, vendors: 25, finance: 25 },
     budgetCaps: {},
@@ -182,7 +182,7 @@ function createBlankPlan() {
     attachments: [],
     profile: {
       planner: "",
-      rsvpDeadline: `${nextYear}-04-20`,
+      rsvpDeadline: "2028-03-20",
       ceremonyTime: "16:00",
       receptionTime: "18:00",
       venueContact: "",
