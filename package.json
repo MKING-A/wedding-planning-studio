@@ -1,0 +1,12 @@
+{
+  "name": "toronto-wedding-planner",
+  "private": true,
+  "version": "1.0.0",
+  "description": "VowSuite Toronto wedding planner - Cloudflare Pages static build",
+  "scripts": {
+    "build": "node scripts/build-pages.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
