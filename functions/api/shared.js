@@ -21,21 +21,59 @@ function tokenFromRequest(request){
   if(cookies.length!==1)return "";
   return cookies[0].slice("CF_Authorization=".length).trim();
 }
-async function signingKey(team,kid){
-  const find=()=>keyCache?.team===team&&keyCache.keys.find(k=>k.kid===kid&&k.kty==="RSA"&&k.n&&k.e);
-  let jwk=Date.now()<cacheUntil?find():null;
-  if(jwk)return jwk;
-  // Refresh when an unknown key ID appears, including during key rotation.
-  // Avoid fetching on every untrusted request with a made-up key ID.
-  if(keyCache?.team===team&&Date.now()<keyCache.fetchedAt+30000)fail("UNKNOWN_KEY");
+// Use only public keys fetched from the configured team, or an explicitly
+// configured short-lived operator fallback. No keys supplied by a client
+// are ever accepted. A successful remote response always takes precedence.
+const validKeys = value => Array.isArray(value)&&value.length>0&&value.length<=20&&
+  value.every(k=>k&&k.kty==="RSA"&&typeof k.kid==="string"&&
+    typeof k.n==="string"&&typeof k.e==="string"&&
+    /^[A-Za-z0-9_-]+$/.test(k.n)&&/^[A-Za-z0-9_-]+$/.test(k.e));
+function emergencyKey(env,team,kid){
+  if(!env.ACCESS_JWKS_FALLBACK||!env.ACCESS_JWKS_FALLBACK_UNTIL)return null;
+  const expiry=Date.parse(String(env.ACCESS_JWKS_FALLBACK_UNTIL).trim());
+  const now=Date.now();
+  // Fail closed unless an explicit short-lived expiration is configured.
+  if(!Number.isFinite(expiry)||expiry<=now||expiry>now+48*60*60*1000)return null;
   try{
-    const response=await fetch(team+"/cdn-cgi/access/certs",{headers:{Accept:"application/json"},redirect:"error"});
-    if(!response.ok)fail("KEYS_UNAVAILABLE");
-    const certs=await response.json();
-    if(!Array.isArray(certs.keys))fail("KEYS_UNAVAILABLE");
-    keyCache={team,keys:certs.keys,fetchedAt:Date.now()};
-    cacheUntil=Date.now()+5*60*1000;
-  }catch{fail("KEYS_UNAVAILABLE");}
+    const doc=JSON.parse(String(env.ACCESS_JWKS_FALLBACK));
+    if(!validKeys(doc.keys))return null;
+    return doc.keys.find(k=>k.kid===kid)||null;
+  }catch{return null;}
+}
+async function fetchTeamKeys(team){
+  const url=team+"/cdn-cgi/access/certs";
+  let response;
+  try{
+    response=await fetch(url,{
+      method:"GET",
+      headers:{Accept:"application/json","User-Agent":"VowSuite-Shared-Plan/1.2"},
+      redirect:"manual"
+    });
+  }catch{fail("KEYS_FETCH_FAILED");}
+  if(response.status>=300&&response.status<400)fail("KEYS_REDIRECT");
+  if(response.status===403)fail("KEYS_HTTP_403");
+  if(response.status===429)fail("KEYS_HTTP_429");
+  if(!response.ok)fail("KEYS_HTTP_ERROR");
+  let certs;
+  try{certs=await response.json();}catch{fail("KEYS_INVALID_JSON");}
+  if(!validKeys(certs?.keys))fail("KEYS_INVALID_JSON");
+  return certs.keys;
+}
+async function signingKey(team,kid,env){
+  const find=()=>keyCache?.team===team&&keyCache.keys.find(k=>k.kid===kid);
+  const now=Date.now();
+  let jwk=now<cacheUntil?find():null;
+  if(jwk)return jwk;
+  if(keyCache?.team===team&&now<keyCache.fetchedAt+30000)fail("UNKNOWN_KEY");
+  let keys;
+  try{keys=await fetchTeamKeys(team);}
+  catch(error){
+    const fallback=emergencyKey(env,team,kid);
+    if(fallback)return fallback;
+    throw error;
+  }
+  keyCache={team,keys,fetchedAt:Date.now()};
+  cacheUntil=Date.now()+5*60*1000;
   jwk=find();
   if(!jwk)fail("UNKNOWN_KEY");
   return jwk;
@@ -63,7 +101,7 @@ async function identity(ctx){
   if(!Number.isFinite(payload.exp)||payload.exp<=now||
      (payload.nbf!==undefined&&(!Number.isFinite(payload.nbf)||payload.nbf>now))||
      (payload.iat!==undefined&&(!Number.isFinite(payload.iat)||payload.iat>now+60)))fail("EXPIRED_OR_EARLY");
-  const jwk=await signingKey(team,head.kid);
+  const jwk=await signingKey(team,head.kid,env);
   try{
     const key=await crypto.subtle.importKey("jwk",{kty:"RSA",n:jwk.n,e:jwk.e,alg:"RS256",ext:true},
        {name:"RSASSA-PKCS1-v1_5",hash:"SHA-256"},false,["verify"]);
@@ -85,7 +123,13 @@ const authErrors=Object.freeze({
   ISSUER_MISMATCH:"[ISSUER_MISMATCH] Login token belongs to another Access team. Check TEAM_DOMAIN.",
   AUD_MISMATCH:"[AUD_MISMATCH] Login token audience does not match POLICY_AUD. Use the main Pages application's AUD tag, then redeploy and sign in again.",
   EXPIRED_OR_EARLY:"[EXPIRED_OR_EARLY] Access login has expired or is not yet valid. Sign in again.",
-  KEYS_UNAVAILABLE:"[KEYS_UNAVAILABLE] Could not retrieve the team's public signing keys. Check TEAM_DOMAIN and retry.",
+  KEYS_FETCH_FAILED:"[KEYS_FETCH_FAILED] The Cloudflare server could not connect to the team's public signing-key endpoint.",
+  KEYS_REDIRECT:"[KEYS_REDIRECT] The signing-key endpoint returned a redirect instead of JSON. Redirects are not trusted.",
+  KEYS_HTTP_403:"[KEYS_HTTP_403] The signing-key endpoint refused the server request (HTTP 403).",
+  KEYS_HTTP_429:"[KEYS_HTTP_429] The signing-key endpoint is rate limited.",
+  KEYS_HTTP_ERROR:"[KEYS_HTTP_ERROR] The signing-key endpoint returned an unsuccessful HTTP status.",
+  KEYS_INVALID_JSON:"[KEYS_INVALID_JSON] The server received an unexpected signing-key response.",
+
   UNKNOWN_KEY:"[UNKNOWN_KEY] Login signing key is not recognized. Sign in again and retry shortly.",
   BAD_SIGNATURE:"[BAD_SIGNATURE] Login token signature could not be verified. Sign in again.",
   NO_EMAIL:"[NO_EMAIL] Verified Access token has no valid email identity. Use an email-based user login.",
@@ -98,7 +142,7 @@ async function authorized(ctx){
   catch(e){
     const code=Object.prototype.hasOwnProperty.call(authErrors,e?.message)?e.message:"AUTH_FAILED";
     return {error:reply({error:authErrors[code]||"[AUTH_FAILED] Access verification failed. Contact the planner administrator.",code},
-      code==="CONFIG"||code==="KEYS_UNAVAILABLE"?503:403)};
+      code==="CONFIG"||code.startsWith("KEYS_")?503:403)};
   }
 }
 async function getPlan(ctx){
